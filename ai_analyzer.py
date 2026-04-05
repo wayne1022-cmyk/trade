@@ -1,6 +1,8 @@
 import json
 import logging
 import time
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 from groq import Groq
 import pandas as pd
 

@@ -181,7 +181,7 @@ import requests
 def analyze_and_generate_signal(df, news, max_retries=3):
     prompt = _build_prompt(df, news)
     
-    client = Groq(api_key=config.Groq_API_KEY) # 使用 config 裡的 API Key
+    client = Groq(api_key=config.GROQ_API_KEY) # 使用 config 裡的 API Key
     latest_close = df["close"].iloc[-1]
 
     for attempt in range(max_retries):

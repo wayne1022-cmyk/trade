@@ -1,6 +1,7 @@
 python-dotenv==1.0.1
+dotenv==0.9.9
 requests==2.32.3
 pandas==2.2.2
 functions-framework==3.5.0
 google-cloud-storage==2.16.0
-trading-ig==0.0.23
+Groq==1.1.2

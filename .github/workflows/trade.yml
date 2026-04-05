@@ -29,10 +29,10 @@ jobs:
         env:
           TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
           FINNHUB_KEY: ${{ secrets.FINNHUB_KEY }}
-          Grok_API_KEY: ${{ secrets.Grok_API_KEY }}
+          Grok_API_KEY: ${{ secrets.GROK_API_KEY }}
           IG_API_KEY: ${{ secrets.IG_API_KEY }}
           IG_IDENTIFIER: ${{ secrets.IG_IDENTIFIER }}
           IG_PASSWORD: ${{ secrets.IG_PASSWORD }}
-          IG_USERNAME:${{ secrets.IG_USERNAME }}
+          IG_USERNAME: ${{ secrets.IG_USERNAME }}
           IG_EPIC: ${{ secrets.IG_EPIC }}
           

@@ -38,7 +38,7 @@ logger = _setup_logging()
 
 ALPHA_VANTAGE_KEY: str = os.getenv("ALPHA_VANTAGE_KEY", "")
 FINNHUB_KEY: str = os.getenv("FINNHUB_KEY", "")
-Groq_API_KEY: str = os.getenv("Groq_API_KEY", "")       # 取代 GEMINI_API_KEY
+GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")   # 大写       # 取代 GEMINI_API_KEY
 IG_API_KEY: str = os.getenv("IG_API_KEY", "")
 IG_IDENTIFIER: str = os.getenv("IG_IDENTIFIER", "")
 IG_PASSWORD: str = os.getenv("IG_PASSWORD", "")

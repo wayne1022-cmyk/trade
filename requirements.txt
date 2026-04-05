@@ -3,4 +3,4 @@ requests==2.32.3
 pandas==2.2.2
 functions-framework==3.5.0
 google-cloud-storage==2.16.0
-trading-ig==2.4.0
+trading-ig==0.0.23

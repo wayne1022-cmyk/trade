@@ -198,7 +198,12 @@ def analyze_and_generate_signal(df, news, max_retries=3):
             if _validate_signal(signal, latest_close):
                 return signal
         except Exception as e:
-            logger.warning(f"Groq API 失敗，重試中 ({attempt+1}/{max_retries}): {e}")
+            # 增强错误打印，显示完整异常信息
+            logger.error(f"Groq API 详细错误: {type(e).__name__}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"HTTP 状态码: {e.response.status_code}")
+                logger.error(f"响应内容: {e.response.text}")
+            logger.warning(f"Groq API 失敗，重試中 ({attempt+1}/{max_retries})...")
             time.sleep(3)
     return None
 

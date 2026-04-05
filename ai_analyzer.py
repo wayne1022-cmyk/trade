@@ -5,6 +5,7 @@ import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 from groq import Groq
 import pandas as pd
+import requests
 
 import config
 from data_fetcher import ATR_PERIOD, EMA_LONG, EMA_SHORT, RSI_PERIOD
@@ -178,36 +179,35 @@ def _validate_signal(signal: dict, latest_close: float) -> bool:
     return True
 
 
-import requests
-
 def analyze_and_generate_signal(df, news, max_retries=3):
     prompt = _build_prompt(df, news)
-    
-    client = Groq(api_key=config.GROQ_API_KEY) # 使用 config 裡的 API Key
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {config.GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"}
+    }
     latest_close = df["close"].iloc[-1]
-
     for attempt in range(max_retries):
         try:
-            chat_completion = client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model="llama-3.3-70b-versatile", # 推薦的模型
-                temperature=0.2,
-                max_tokens=4096,
-                response_format={"type": "json_object"} # 要求 JSON 格式輸出
-            )
-            raw = chat_completion.choices[0].message.content
+            resp = requests.post(url, json=payload, headers=headers, timeout=60)
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"]
             signal = json.loads(raw.strip())
             if _validate_signal(signal, latest_close):
                 return signal
         except Exception as e:
-            # 增强错误打印，显示完整异常信息
-            logger.error(f"Groq API 详细错误: {type(e).__name__}: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"HTTP 状态码: {e.response.status_code}")
-                logger.error(f"响应内容: {e.response.text}")
-            logger.warning(f"Groq API 失敗，重試中 ({attempt+1}/{max_retries})...")
-            time.sleep(3)
+            logger.error(f"Groq API 失败 (尝试 {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(3)
     return None
+
 
 # ── 模組直接執行時進行自我測試 ───────────────────────────────
 if __name__ == "__main__":

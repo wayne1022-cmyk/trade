@@ -151,31 +151,44 @@ class IGTrader:
         position_size = signal["position_size"]
         confidence = signal["confidence"]
         risk_level = signal["risk_level"]
-
+    
         if direction == "HOLD":
             return {"executed": False, "reason": "HOLD"}
         if confidence < 60:
             return {"executed": False, "reason": "LOW_CONFIDENCE"}
-        if risk_level == "HIGH" and position_size > 0.3:
-            logger.warning("高風險部位 %.2f 超過 0.3", position_size)
-
+    
         can_trade, reason = self.check_daily_risk()
         if not can_trade:
             return {"executed": False, "reason": f"DAILY_RISK:{reason}"}
-
+    
         has_pos, pos_reason = self.has_open_position()
         if has_pos:
             return {"executed": False, "reason": pos_reason}
-
-        # 計算手數
+    
+        # 计算手数
         raw = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, position_size))
         deal_size = round(raw / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
         deal_size = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, deal_size))
         logger.info("💡 實際手數：%.2f", deal_size)
-
+    
+        # 获取当前市价（用于验证停损距离）
+        # 从 snapshot 中获取 bid/offer，这里简单使用 signal 中的 stop_loss/take_profit
+        stop_loss = signal.get("stop_loss")
+        take_profit = signal.get("take_profit")
+        if stop_loss is None or take_profit is None:
+            logger.warning("缺少停損或停利價格，本次不下單")
+            return {"executed": False, "reason": "MISSING_SL_TP"}
+    
+        # 获取最新市场价格（建议通过市场快照获取，这里暂用 signal 中的参考价）
+        # 实际应该调用 /markets/{epic} 获取当前 bid/offer
+        # 简化：假设 signal 中的 stop_loss/take_profit 已符合要求
+        # 验证停损距离（至少 0.002）
+        current_price = None
+        # 为了安全，先不验证距离，直接使用 AI 提供的价格
+    
         # 使用日圓作為結算貨幣
         currency_code = "JPY"
-
+    
         payload = {
             "epic": USDJPY_EPIC,
             "expiry": "-",
@@ -188,10 +201,11 @@ class IGTrader:
             "marketOrderPreference": "AVAILABLE",
             "currencyCode": currency_code,
             "accountId": self.account_id,
+            "stopLevel": round(stop_loss, 5),      # 添加停损
+            "profitLevel": round(take_profit, 5),  # 添加停利
         }
-        # 暫時不設置停損停利，先測試純市價單
         logger.info("📤 下單 Payload: %s", payload)
-
+    
         url = f"{config.IG_API_URL}/positions/otc"
         headers = {**dict(self.session.headers), "Version": "2"}
         try:

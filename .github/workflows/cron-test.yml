@@ -1,0 +1,12 @@
+name: Cron Test
+on:
+  schedule:
+    - cron: '*/1 * * * *'   # 每10分鐘一次，不限制時段
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show time
+        run: echo "UTC time: $(date -u)"

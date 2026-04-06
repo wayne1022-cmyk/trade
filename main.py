@@ -29,6 +29,7 @@ def run_trading_bot() -> dict:
     Returns:
         執行結果摘要 dict
     """
+    config.validate_config()
     logger.info("=" * 60)
     logger.info("🚀 USDJPY 自動交易機器人啟動")
     logger.info("=" * 60)
@@ -60,7 +61,7 @@ def run_trading_bot() -> dict:
         news = []
 
     # ── Step 3：AI 分析產生交易訊號 ───────────────────────────
-    logger.info("【Step 3】Gemini AI 總經分析")
+    logger.info("【Step 3】Groq AI 總經分析")
     signal = analyze_and_generate_signal(df, news)
 
     if signal is None:
@@ -90,6 +91,7 @@ def run_trading_bot() -> dict:
         balance = trader.get_account_balance()
         if balance is None:
             logger.warning("⚠️ 無法取得帳戶餘額，仍繼續嘗試下單")
+            result["error"] = "balance_unavailable"
 
         # 執行下單
         order_result = trader.place_order(signal)
@@ -130,8 +132,11 @@ def run_trading_bot() -> dict:
                 logger.error("❌ 下單失敗：%s", reason)
 
     finally:
-        # 無論成功或失敗，都確保登出
-        trader.logout()
+            # 無論成功或失敗，都確保登出
+        try:
+            trader.logout()
+        except Exception:
+            pass
 
     # ── 流程結束 ──────────────────────────────────────────────
     logger.info("=" * 60)
@@ -156,7 +161,6 @@ def gcf_entry_point(request):
     Cloud Scheduler 每小時呼叫此函式。
     """
     try:
-        config.validate_config()
         result = run_trading_bot()
         return (json.dumps(result, ensure_ascii=False), 200,
                 {"Content-Type": "application/json"})
@@ -175,7 +179,6 @@ def gcf_entry_point(request):
 
 # ── 本機直接執行 ──────────────────────────────────────────────
 if __name__ == "__main__":
-    config.validate_config()
     result = run_trading_bot()
 
     print("\n===== 執行結果摘要 =====")

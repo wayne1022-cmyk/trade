@@ -2,10 +2,9 @@ name: Trade Bot Debug
 
 on:
   schedule:
-    # 每10分钟一次，周一至周五 UTC 0-10点（台湾8-18点）
-    - cron: '*/10 0-23 * * 1-5'
+    - cron: '*/10 * * * *'   # 每10分钟执行一次，不限时段
   workflow_dispatch:
-
+  
 jobs:
   trade:
     runs-on: ubuntu-latest

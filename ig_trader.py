@@ -338,8 +338,13 @@ class IGTrader:
                 return {"executed": False, "reason": f"UNKNOWN:{deal_status}", "detail": confirm}
 
         except Exception as e:
-            logger.error("❌ 下單失敗：%s", e, exc_info=True)
-            return {"executed": False, "reason": f"ERROR:{e}", "detail": None}
+    # 加這幾行
+          try:
+            logger.error("❌ IG 回傳內容：%s", response.json())
+          except Exception:
+            logger.error("❌ IG 回傳原始內容：%s", response.text)
+          logger.error("❌ 下單失敗：%s", e, exc_info=True)
+          return {"executed": False, "reason": f"ERROR:{e}", "detail": None}
 
     # ── 確認下單結果 ──────────────────────────────────────────────
     def _confirm_deal(self, deal_reference: str) -> dict | None:

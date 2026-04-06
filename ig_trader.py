@@ -1,5 +1,5 @@
 """
-ig_trader.py - IG Trading 交易執行模組（淨倉位管理版，支援平倉）
+ig_trader.py - IG Trading 交易執行模組（淨倉位管理版，先平倉再開反向）
 固定維持 0.2 手倉位，方向由 AI 信號決定。
 """
 
@@ -138,7 +138,7 @@ class IGTrader:
             return None
 
     def get_current_position(self):
-        """返回 (方向, 手數, dealId)，若無持倉則 (None, 0, None)"""
+        """返回 (方向, 手數, epic)，若無持倉則 (None, 0, None)"""
         positions = self.get_open_positions()
         if not positions:
             return None, 0, None
@@ -147,13 +147,12 @@ class IGTrader:
             if USDJPY_EPIC in epic:
                 direction = pos.get("position", {}).get("direction")  # "BUY" or "SELL"
                 size = float(pos.get("position", {}).get("size", 0))
-                deal_id = pos.get("position", {}).get("dealId")
-                return direction, size, deal_id
+                return direction, size, epic
         return None, 0, None
 
-    def close_position(self, epic: str, deal_id: str) -> bool:
-        """平倉指定 EPIC 的具體持倉（需要 dealId）"""
-        url = f"{config.IG_API_URL}/positions/{epic}/{deal_id}"
+    def close_position(self, epic: str) -> bool:
+        """平倉指定 EPIC 的所有持倉（不使用 dealId）"""
+        url = f"{config.IG_API_URL}/positions/{epic}"
         headers = {**dict(self.session.headers), "Version": "1"}
         try:
             resp = self.session.delete(url, headers=headers, timeout=10)
@@ -241,24 +240,26 @@ class IGTrader:
             logger.error("每日風控觸發：%s", reason)
             return {"executed": False, "reason": f"DAILY_RISK:{reason}", "detail": None}
 
-        curr_dir, curr_size, _ = self.get_current_position()
-        logger.info("當前持倉：方向=%s, 手數=%.2f", curr_dir if curr_dir else "無", curr_size)
-    
+        # 獲取當前持倉
+        curr_dir, curr_size, curr_epic = self.get_current_position()
+        logger.info("當前持倉：方向=%s, 手數=%.2f, epic=%s", curr_dir if curr_dir else "無", curr_size, curr_epic)
+
         # 無持倉 -> 開目標倉位
         if curr_dir is None:
             return self._open_position(direction, TARGET_SIZE, stop_loss, take_profit)
-    
+
         # 同向 -> 不操作
         if curr_dir == direction:
             logger.info("方向一致，不調整")
             return {"executed": False, "reason": "ALREADY_ALIGNED"}
-    
-        # 反向 -> 開反向倉位 (現有 + 目標)
-        reverse_size = curr_size + TARGET_SIZE
-        # 可選：限制最大手數（例如不超過 1.0）
-        reverse_size = min(reverse_size, 1.0)
-        logger.info("方向相反，開反向 %.2f 手 %s", reverse_size, direction)
-        return self._open_position(direction, reverse_size, stop_loss, take_profit)
+
+        # 反向 -> 先平倉，再開目標倉位
+        logger.info("方向相反（現有 %s，AI 建議 %s），先平倉再開新倉", curr_dir, direction)
+        if not self.close_position(curr_epic):
+            logger.error("平倉失敗，停止開新倉")
+            return {"executed": False, "reason": "CLOSE_FAILED", "detail": None}
+        # 平倉後開新倉（目標 0.2 手）
+        return self._open_position(direction, TARGET_SIZE, stop_loss, take_profit)
 
     def _confirm_deal(self, deal_reference: str, retries=3) -> dict | None:
         for i in range(retries):
@@ -294,8 +295,9 @@ if __name__ == "__main__":
     trader = IGTrader()
     if trader.login():
         trader.get_account_balance()
+        # 測試反向平倉
         fake_signal = {
-            "direction": "SELL",   # 測試反向平倉
+            "direction": "SELL",
             "confidence": 75,
             "stop_loss": 159.00,
             "take_profit": 158.50,

@@ -112,6 +112,9 @@ def run_trading_bot() -> dict:
             elif reason == "HOLD":
                 result["status"] = "hold"
                 logger.info("⏸️  本次決策為 HOLD，無交易執行")
+            elif reason == "ALREADY_ALIGNED":
+                result["status"] = "skipped"
+                logger.info("⏸️  方向一致，無需調整倉位")
             elif reason == "ALREADY_IN_POSITION":
                 result["status"] = "skipped"
                 logger.info("⏸️  已有持倉，跳過本次下單")

@@ -10,7 +10,7 @@ import config
 logger = logging.getLogger(__name__)
 
 # USDJPY 在 IG 的 Epic 代碼（Demo 環境）
-USDJPY_EPIC = "CS.D.USDJPY.CFD.IP"
+USDJPY_EPIC = "CS.D.USDJPY.MINI.IP"
 
 # 下單手數範圍與步進
 MIN_DEAL_SIZE = 0.2

@@ -2,25 +2,17 @@ name: USDJPY Trading Bot
 
 on:
   schedule:
-    - cron: '0 0 * * 1-5'
-    - cron: '0 1 * * 1-5'
-    - cron: '0 2 * * 1-5'
-    - cron: '0 3 * * 1-5'
-    - cron: '0 4 * * 1-5'
-    - cron: '0 5 * * 1-5'
-    - cron: '0 6 * * 1-5'
-    - cron: '0 7 * * 1-5'
-    - cron: '0 8 * * 1-5'
-    - cron: '0 9 * * 1-5'
-    - cron: '0 10 * * 1-5'
+    # UTC 00:00 到 10:00 (對應台灣時間 08:00 到 18:00)，週一到週五
+    - cron: '0 0-10 * * 1-5'
   workflow_dispatch:
+
+# 確保 GitHub Actions 有權限將 log 檔案 push 回你的 repo
+permissions:
+  contents: write
 
 jobs:
   trade:
     runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      github.event.schedule != '0 10 * * 1-5'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run trading bot
+      - name: Run trading bot (main.py)
         run: python main.py
         env:
           TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
@@ -45,18 +37,22 @@ jobs:
           IG_USERNAME: ${{ secrets.IG_USERNAME }}
           IG_EPIC: ${{ secrets.IG_EPIC }}
 
-      - name: Commit and push log file
+      - name: Commit and push trade log
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
+          # 如果有變更才進行 commit，避免報錯
           git diff --quiet && git diff --staged --quiet || git commit -m "Update trade log [skip ci]"
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
 
   settle:
     runs-on: ubuntu-latest
+    # 關鍵：確保 18:00 時，trade 跑完才跑 settle
+    needs: trade
+    # 只有在 UTC 10:00 (台灣時間 18:00) 才觸發此結算任務
     if: github.event.schedule == '0 10 * * 1-5'
     steps:
       - name: Checkout code
@@ -70,7 +66,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run settlement
+      - name: Run settlement (settle.py)
         run: python settle.py
         env:
           TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
@@ -81,3 +77,13 @@ jobs:
           IG_PASSWORD: ${{ secrets.IG_PASSWORD }}
           IG_USERNAME: ${{ secrets.IG_USERNAME }}
           IG_EPIC: ${{ secrets.IG_EPIC }}
+
+      - name: Commit and push settle log
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update settle log [skip ci]"
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:main

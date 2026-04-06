@@ -2,17 +2,20 @@ name: USDJPY Trading Bot
 
 on:
   schedule:
-    # UTC 00:00 到 10:00 (對應台灣時間 08:00 到 18:00)，週一到週五
-    - cron: '0 0-23 * * 1-5'
+    # 每10分钟一次 (UTC时间)，周一至周五，对应台湾时间 08:00 到次日 07:50
+    - cron: '*/10 0-23 * * 1-5'
+    # 结算时间：UTC 10:00 (台湾 18:00) 独立触发
+    - cron: '0 10 * * 1-5'
   workflow_dispatch:
 
-# 確保 GitHub Actions 有權限將 log 檔案 push 回你的 repo
 permissions:
   contents: write
 
 jobs:
   trade:
     runs-on: ubuntu-latest
+    # 排除结算时间点的触发（避免同时运行两个 job），结算任务单独处理
+    if: github.event.schedule != '0 10 * * 1-5' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -44,15 +47,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          # 如果有變更才進行 commit，避免報錯
           git diff --quiet && git diff --staged --quiet || git commit -m "Update trade log [skip ci]"
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
 
   settle:
     runs-on: ubuntu-latest
-    # 關鍵：確保 18:00 時，trade 跑完才跑 settle
-    needs: trade
-    # 只有在 UTC 10:00 (台灣時間 18:00) 才觸發此結算任務
+    # 仅在结算时间触发
     if: github.event.schedule == '0 10 * * 1-5'
     steps:
       - name: Checkout code

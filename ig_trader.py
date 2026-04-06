@@ -144,20 +144,27 @@ class IGTrader:
         return None, 0
 
     def close_all_positions(self) -> bool:
-        """平仓所有 USDJPY 持仓"""
-        url = f"{config.IG_API_URL}/positions/{USDJPY_EPIC}"
-        headers = {**dict(self.session.headers), "Version": "1"}
-        try:
-            resp = self.session.delete(url, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                logger.info("✅ 平仓所有 USDJPY 持仓成功")
-                return True
-            else:
-                logger.error("❌ 平仓失败：HTTP %d - %s", resp.status_code, resp.text)
-                return False
-        except Exception as e:
-            logger.error("平仓异常：%s", e)
-            return False
+        positions = self.get_open_positions()
+        if not positions:
+            return True
+        success = True
+        for pos in positions:
+            epic = pos.get("market", {}).get("epic", "")
+            if USDJPY_EPIC in epic:   # 允许部分匹配，避免大小写或后缀差异
+                deal_id = pos.get("position", {}).get("dealId")
+                if not deal_id:
+                    logger.error("无法获取 dealId，跳过平仓")
+                    success = False
+                    continue
+                url = f"{config.IG_API_URL}/positions/{epic}/{deal_id}"
+                headers = {**dict(self.session.headers), "Version": "1"}
+                resp = self.session.delete(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    logger.info(f"平仓成功: {epic}")
+                else:
+                    logger.error(f"平仓失败 {epic}: {resp.text}")
+                    success = False
+        return success
 
     # ==================== 開倉（帶停損停利） ====================
     def _open_position(self, direction: str, size: float, stop_loss: float = None, take_profit: float = None) -> dict:

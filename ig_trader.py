@@ -241,32 +241,24 @@ class IGTrader:
             logger.error("每日風控觸發：%s", reason)
             return {"executed": False, "reason": f"DAILY_RISK:{reason}", "detail": None}
 
-        # 獲取當前持倉
-        curr_dir, curr_size, deal_id = self.get_current_position()
-        logger.info("當前持倉：方向=%s, 手數=%.2f, dealId=%s", curr_dir if curr_dir else "無", curr_size, deal_id)
-
-        # 情況1：無持倉 -> 開倉 TARGET_SIZE
+        curr_dir, curr_size, _ = self.get_current_position()
+        logger.info("當前持倉：方向=%s, 手數=%.2f", curr_dir if curr_dir else "無", curr_size)
+    
+        # 無持倉 -> 開目標倉位
         if curr_dir is None:
-            logger.info("無持倉，按 AI 方向開倉 %.2f 手 %s", TARGET_SIZE, direction)
             return self._open_position(direction, TARGET_SIZE, stop_loss, take_profit)
-
-        # 情況2：有持倉且方向相同 -> 不操作
+    
+        # 同向 -> 不操作
         if curr_dir == direction:
-            logger.info("已有同向持倉 %.2f 手 %s，維持不變", curr_size, curr_dir)
-            return {"executed": False, "reason": "ALREADY_ALIGNED", "detail": None}
-
-        # 情況3：有持倉且方向相反 -> 先平倉（需要 dealId），再開新倉
-        if not deal_id:
-            logger.error("無法獲取持倉的 dealId，無法平倉")
-            return {"executed": False, "reason": "NO_DEAL_ID", "detail": None}
-
-        logger.info("持倉方向相反（現有 %s，AI 建議 %s），先平倉再開新倉", curr_dir, direction)
-        closed = self.close_position(USDJPY_EPIC, deal_id)
-        if not closed:
-            logger.error("平倉失敗，停止開新倉")
-            return {"executed": False, "reason": "CLOSE_FAILED", "detail": None}
-        # 平倉後開新倉
-        return self._open_position(direction, TARGET_SIZE, stop_loss, take_profit)
+            logger.info("方向一致，不調整")
+            return {"executed": False, "reason": "ALREADY_ALIGNED"}
+    
+        # 反向 -> 開反向倉位 (現有 + 目標)
+        reverse_size = curr_size + TARGET_SIZE
+        # 可選：限制最大手數（例如不超過 1.0）
+        reverse_size = min(reverse_size, 1.0)
+        logger.info("方向相反，開反向 %.2f 手 %s", reverse_size, direction)
+        return self._open_position(direction, reverse_size, stop_loss, take_profit)
 
     def _confirm_deal(self, deal_reference: str, retries=3) -> dict | None:
         for i in range(retries):

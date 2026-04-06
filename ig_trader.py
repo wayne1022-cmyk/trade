@@ -23,7 +23,7 @@ IG_HEADERS_BASE = {
 }
 
 # USDJPY 在 IG 的 Epic 代碼（Demo 環境）
-USDJPY_EPIC = "CS.D.USDJPY.MINI.IP" #"CS.D.USDJPY.MINI.IP" "CS.D.USDJPY.CFD.IP"
+USDJPY_EPIC = "CS.D.USDJPY.CFD.IP" #"CS.D.USDJPY.MINI.IP" "CS.D.USDJPY.CFD.IP"
 
 # 最小下單單位（Mini Contract = 10,000 單位）
 MIN_DEAL_SIZE = 1
@@ -249,7 +249,17 @@ class IGTrader:
             logger.warning("⚠️ 已有 USDJPY 持倉")
             return {"executed": False, "reason": "ALREADY_IN_POSITION", "detail": None}
 
-        deal_size = max(1, min(5, round(5 * position_size)))
+        # 设定最小仓位和最大仓位
+        min_size = 0.2
+        max_size = 1.0
+        step = 0.01   # 标准步进
+
+        # 先限制范围
+        raw_size = max(min_size, min(max_size, position_size))
+        # 按步进取整（四舍五入到最近的 step）
+        deal_size = round(raw_size / step) * step
+        # 防止浮点误差导致略低于 min_size 或高于 max_size
+        deal_size = max(min_size, min(max_size, deal_size))
         logger.info("💡 AI 建議部位：%.1f → 實際手數：%d", position_size, deal_size)
 
         balance = self.get_account_balance()
@@ -262,7 +272,6 @@ class IGTrader:
         headers = {**dict(self.session.headers), "Version": "2"}
         payload = {
             "epic": USDJPY_EPIC,
-            "expiry": "-",
             "direction": direction,
             "size": str(deal_size),
             "orderType": "MARKET",

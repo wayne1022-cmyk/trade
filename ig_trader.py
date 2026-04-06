@@ -1,10 +1,17 @@
 """
-ig_trader.py - IG Trading 交易執行模組（最終修正版，使用 JPY 貨幣）
+ig_trader.py - IG Trading 交易執行模組
+負責：
+  1. 登入 IG Demo API 取得 Session Token
+  2. 查詢 USDJPY 的 Epic 代碼與最小下單單位
+  3. 根據 AI 訊號執行下單（含停損停利）
+  4. 登出 Session
 """
 
 import logging
-import time
+import time  # ✅ 修正3：移至頂部，不放在函式內部
+
 import requests
+
 import config
 
 logger = logging.getLogger(__name__)
@@ -19,248 +26,371 @@ DEAL_SIZE_STEP = 0.01
 
 
 class IGTrader:
+    """IG Trading API 封裝類別。"""
+
     def __init__(self):
-        self.session = requests.Session()
+        self.session      = requests.Session()
+        # ✅ 修正6：改在 __init__ 動態讀取 API Key，避免 module 載入時快照到空字串
         self.session.headers.update({
             "Content-Type": "application/json; charset=UTF-8",
-            "Accept": "application/json; charset=UTF-8",
+            "Accept":       "application/json; charset=UTF-8",
             "X-IG-API-KEY": config.IG_API_KEY,
         })
-        self.cst = None
-        self.x_security = None
-        self.account_id = None
+        self.cst          = None   # Client Security Token
+        self.x_security   = None   # X-SECURITY-TOKEN
+        self.account_id   = None
         self.is_logged_in = False
 
-    # ==================== 登入 ====================
+    # ── 登入 ────────────────────────────────────────────────────
     def login(self, max_retries: int = 3, retry_delay: int = 5) -> bool:
-        url = f"{config.IG_API_URL}/session"
+        """
+        登入 IG API，取得 CST 與 X-SECURITY-TOKEN。
+        失敗時自動重試最多 max_retries 次。
+
+        Returns:
+            True 若登入成功，False 若失敗
+        """
+        url     = f"{config.IG_API_URL}/session"
         headers = {**dict(self.session.headers), "Version": "2"}
         payload = {
-            "identifier": config.IG_IDENTIFIER,
-            "password": config.IG_PASSWORD,
+            "identifier":        config.IG_IDENTIFIER,
+            "password":          config.IG_PASSWORD,
             "encryptedPassword": False,
         }
 
         for attempt in range(1, max_retries + 1):
-            logger.info("🔐 登入 IG Demo API...（%d/%d）", attempt, max_retries)
+            logger.info("🔐 正在登入 IG Demo API...（第 %d/%d 次嘗試）", attempt, max_retries)
             try:
-                resp = self.session.post(url, json=payload, headers=headers, timeout=30)
-                resp.raise_for_status()
-                data = resp.json()
-                self.cst = resp.headers.get("CST")
-                self.x_security = resp.headers.get("X-SECURITY-TOKEN")
-                # 正確獲取 accountId
-                self.account_id = data.get("currentAccountId") or data.get("accountId")
-                if not self.account_id:
-                    accounts = data.get("accounts", [])
-                    if accounts:
-                        self.account_id = accounts[0].get("accountId")
-                if not self.cst or not self.x_security or not self.account_id:
-                    logger.error("登入失敗：缺少必要資訊")
+                response = self.session.post(url, json=payload, headers=headers, timeout=30)
+                response.raise_for_status()
+
+                data            = response.json()
+                self.cst        = response.headers.get("CST")
+                self.x_security = response.headers.get("X-SECURITY-TOKEN")
+                self.account_id = data.get("accountId", "")
+
+                if not self.cst or not self.x_security:
+                    logger.error("❌ 登入失敗：回應中缺少 CST 或 X-SECURITY-TOKEN")
                     if attempt < max_retries:
+                        logger.info("⏳ %d 秒後重試...", retry_delay)
                         time.sleep(retry_delay)
                     continue
+
                 self.session.headers.update({
-                    "CST": self.cst,
+                    "CST":              self.cst,
                     "X-SECURITY-TOKEN": self.x_security,
                 })
+
                 self.is_logged_in = True
-                logger.info("✅ 登入成功，帳號 ID：%s", self.account_id)
+                logger.info("✅ IG 登入成功！帳號 ID：%s", self.account_id)
                 return True
+
+            except requests.exceptions.Timeout:
+                logger.warning("⚠️ 登入逾時（第 %d 次）", attempt)
+            except requests.exceptions.ConnectionError:
+                logger.warning("⚠️ 連線失敗（第 %d 次）", attempt)
+            except requests.exceptions.HTTPError as e:
+                logger.warning("⚠️ 登入 HTTP 錯誤（第 %d 次）：%s", attempt, e)
             except Exception as e:
-                logger.warning("登入失敗（%d/%d）：%s", attempt, max_retries, e)
-                if attempt < max_retries:
-                    time.sleep(retry_delay)
+                logger.warning("⚠️ 登入未預期錯誤（第 %d 次）：%s", attempt, e)
+
+            if attempt < max_retries:
+                logger.info("⏳ %d 秒後重試...", retry_delay)
+                time.sleep(retry_delay)
+
+        logger.error("❌ 登入失敗，已重試 %d 次仍無法連線", max_retries)
         return False
 
-    # ==================== 查詢餘額 ====================
+    # ── 查詢帳戶餘額 ─────────────────────────────────────────────
     def get_account_balance(self) -> dict | None:
+        """
+        查詢帳戶餘額資訊。
+
+        Returns:
+            包含 available、equity、profitLoss、currency 的 dict，失敗回傳 None
+        """
         if not self.is_logged_in:
+            logger.error("❌ 尚未登入")
             return None
+
         try:
             url = f"{config.IG_API_URL}/accounts"
             headers = {**dict(self.session.headers), "Version": "1"}
-            resp = self.session.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
-            accounts = resp.json().get("accounts", [])
+            response = self.session.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            accounts = response.json().get("accounts", [])
             if not accounts:
+                logger.warning("⚠️ 查無帳戶資料")
                 return None
+
             account = accounts[0]
             balance = account.get("balance", {})
+
+            # ✅ 修正1：currency 在 account 層級，不在 balance 內，統一合併後回傳
             result = {
-                "available": balance.get("available", 0),
-                "equity": balance.get("equity", 0),
+                "available":  balance.get("available", 0),
+                "equity":     balance.get("equity", 0),
                 "profitLoss": balance.get("profitLoss", 0),
-                "currency": account.get("currency", "USD"),
+                "currency":   account.get("currency", "USD"),
             }
-            logger.info("💰 餘額 - 可用：%.2f | 淨值：%.2f | 幣別：%s",
+
+            logger.info("💰 帳戶餘額 - 可用：%.2f | 淨值：%.2f | 幣別：%s",
                         result["available"], result["equity"], result["currency"])
             return result
+
         except Exception as e:
-            logger.error("查詢餘額失敗：%s", e)
+            logger.error("❌ 查詢帳戶餘額失敗：%s", e, exc_info=True)
             return None
 
-    # ==================== 每日損益 ====================
+    # ── 查詢每日損益 ──────────────────────────────────────────────
     def get_daily_pnl(self) -> dict | None:
-        balance = self.get_account_balance()
-        if not balance:
+        """查詢今日損益（從餘額中獲取 profitLoss）"""
+        if not self.is_logged_in:
+            logger.error("❌ 尚未登入")
             return None
-        equity = balance.get("equity", 0)
-        pnl = balance.get("profitLoss", 0)
-        loss_pct = (-pnl / equity * 100) if equity > 0 and pnl < 0 else 0.0
-        return {"pnl": pnl, "trade_count": 0, "equity": equity, "loss_pct": loss_pct}
 
+        try:
+            balance = self.get_account_balance()
+            if balance is None:
+                return None
+
+            equity = balance.get("equity", 0)
+            pnl    = balance.get("profitLoss", 0)
+            loss_pct = (-pnl / equity * 100) if equity > 0 and pnl < 0 else 0.0
+
+            # ✅ 修正5：trade_count 永遠是 0 導致次數風控失效，明確標示未實作
+            # TODO: 實作真正的交易次數統計（例如查詢當日成交紀錄）
+            trade_count = 0
+
+            logger.info("📊 今日損益：%.2f | 虧損比例：%.2f%% ｜交易次數統計：未實作",
+                        pnl, loss_pct)
+            return {
+                "pnl":         pnl,
+                "trade_count": trade_count,
+                "equity":      equity,
+                "loss_pct":    loss_pct,
+            }
+        except Exception as e:
+            logger.error("❌ 查詢每日損益失敗：%s", e, exc_info=True)
+            return None
+
+    # ── 每日風控檢查 ──────────────────────────────────────────────
     def check_daily_risk(self) -> tuple[bool, str]:
         daily = self.get_daily_pnl()
-        if not daily:
+        if daily is None:
+            logger.warning("⚠️ 無法取得每日損益，暫停交易")
             return False, "CANNOT_FETCH_DAILY_PNL"
+
         max_loss_pct = config.MAX_DAILY_LOSS_PCT * 100
         if daily["loss_pct"] >= max_loss_pct:
+            logger.error("🛑 今日虧損 %.2f%% 已達上限 %.2f%%", daily["loss_pct"], max_loss_pct)
             return False, f"DAILY_LOSS_LIMIT:{daily['loss_pct']:.2f}%"
+
+        # ✅ 修正5：trade_count 未實作時跳過次數檢查，避免製造「有保護」的假象
+        # TODO: trade_count 實作後取消下方註解
+        # if daily["trade_count"] >= config.MAX_DAILY_TRADES:
+        #     logger.error("🛑 今日交易次數 %d 已達上限 %d", daily["trade_count"], config.MAX_DAILY_TRADES)
+        #     return False, f"DAILY_TRADE_LIMIT:{daily['trade_count']}"
+
+        logger.info("✅ 每日風控檢查通過：虧損 %.2f%%", daily["loss_pct"])
         return True, ""
 
-    # ==================== 持倉查詢 ====================
+    # ── 查詢現有持倉 ─────────────────────────────────────────────
     def get_open_positions(self) -> list | None:
         if not self.is_logged_in:
+            logger.error("❌ 尚未登入")
             return None
+
         try:
             url = f"{config.IG_API_URL}/positions"
             headers = {**dict(self.session.headers), "Version": "2"}
-            resp = self.session.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
-            return resp.json().get("positions", [])
+            response = self.session.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            positions = response.json().get("positions", [])
+            logger.info("📋 目前持倉數量：%d", len(positions))
+            for pos in positions:
+                market = pos.get("market", {})
+                deal   = pos.get("position", {})
+                logger.info("  持倉：%s | 方向：%s | 手數：%s | 開倉價：%s",
+                            market.get("epic", ""),
+                            deal.get("direction", ""),
+                            deal.get("size", ""),
+                            deal.get("level", ""))
+            return positions
         except Exception as e:
-            logger.error("查詢持倉失敗：%s", e)
+            logger.error("❌ 查詢持倉失敗：%s", e, exc_info=True)
             return None
 
+    # ── 檢查是否已有 USDJPY 持倉 ─────────────────────────────────
     def has_open_position(self) -> tuple[bool, str]:
+        """
+        檢查是否已有 USDJPY 持倉。
+
+        Returns:
+            (has_position: bool, reason: str)
+            reason 為空字串代表無持倉可以下單；
+            "ALREADY_IN_POSITION" 代表已有持倉；
+            "POSITION_CHECK_FAILED" 代表 API 查詢失敗。
+        """
         positions = self.get_open_positions()
+
+        # ✅ 修正4：API 失敗時回傳獨立 reason，不混入 ALREADY_IN_POSITION
         if positions is None:
+            logger.warning("⚠️ 無法確認持倉狀態，停止下單")
             return True, "POSITION_CHECK_FAILED"
+
         for pos in positions:
-            if USDJPY_EPIC in pos.get("market", {}).get("epic", ""):
+            epic = pos.get("market", {}).get("epic", "")
+            if USDJPY_EPIC in epic:
+                logger.warning("⚠️ 已有 USDJPY 持倉（%s），跳過下單", epic)
                 return True, "ALREADY_IN_POSITION"
+
         return False, ""
 
-    # ==================== 下單 ====================
+    # ── 下單 ─────────────────────────────────────────────────────
     def place_order(self, signal: dict) -> dict | None:
-        if not self.is_logged_in or not self.account_id:
-            return {"executed": False, "reason": "NOT_LOGGED_IN"}
+        if not self.is_logged_in:
+            logger.error("❌ 尚未登入")
+            return None
 
-        direction = signal["direction"]
+        direction     = signal["direction"]
+        stop_loss     = signal["stop_loss"]
+        take_profit   = signal["take_profit"]
         position_size = signal["position_size"]
-        confidence = signal["confidence"]
-        risk_level = signal["risk_level"]
+        confidence    = signal["confidence"]
+        risk_level    = signal["risk_level"]
 
         if direction == "HOLD":
-            return {"executed": False, "reason": "HOLD"}
+            logger.info("⏸️ AI 建議 HOLD")
+            return {"executed": False, "reason": "HOLD", "detail": None}
+
         if confidence < 60:
-            return {"executed": False, "reason": "LOW_CONFIDENCE"}
+            logger.warning("⚠️ 信心度過低（%d%%）", confidence)
+            return {"executed": False, "reason": "LOW_CONFIDENCE", "detail": None}
+
+        # ✅ 修正8：不在此處靜默修正 position_size，ai_analyzer 已驗證
+        # 若 HIGH 風險仍超過 0.3，記錄警告但不阻止（驗證責任在上游）
         if risk_level == "HIGH" and position_size > 0.3:
-            logger.warning("高風險部位 %.2f 超過 0.3", position_size)
+            logger.warning("⚠️ 高風險訊號 position_size=%.2f 超過 0.3，請確認上游驗證是否正常", position_size)
 
-        can_trade, reason = self.check_daily_risk()
+        can_trade, risk_reason = self.check_daily_risk()
         if not can_trade:
-            return {"executed": False, "reason": f"DAILY_RISK:{reason}"}
+            logger.error("🛑 每日風控觸發：%s", risk_reason)
+            return {"executed": False, "reason": f"DAILY_RISK:{risk_reason}", "detail": None}
 
-        has_pos, pos_reason = self.has_open_position()
-        if has_pos:
-            return {"executed": False, "reason": pos_reason}
+        # ✅ 修正4：has_open_position 現在回傳 tuple，解構取出 reason
+        has_position, position_reason = self.has_open_position()
+        if has_position:
+            logger.warning("⚠️ 持倉檢查阻止下單：%s", position_reason)
+            return {"executed": False, "reason": position_reason, "detail": None}
 
-        # 計算手數
-        raw = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, position_size))
-        deal_size = round(raw / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
+        # 計算實際下單手數（限制範圍並對齊步進）
+        raw_size  = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, position_size))
+        deal_size = round(raw_size / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
         deal_size = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, deal_size))
-        logger.info("💡 實際手數：%.2f", deal_size)
 
-        # 使用日圓作為結算貨幣
-        currency_code = "JPY"
+        # ✅ 修正2：log 改用 %.2f，避免 %d 截斷浮點數顯示成 0
+        logger.info("💡 AI 建議部位：%.2f → 實際手數：%.2f", position_size, deal_size)
 
-        payload = {
-            "epic": USDJPY_EPIC,
-            "expiry": "-",
-            "direction": direction,
-            "size": f"{deal_size:.2f}",
-            "orderType": "MARKET",
-            "timeInForce": "FILL_OR_KILL",
-            "guaranteedStop": False,
-            "forceOpen": True,
-            "marketOrderPreference": "AVAILABLE",
-            "currencyCode": currency_code,
-            "accountId": self.account_id,
-        }
-        # 暫時不設置停損停利，先測試純市價單
-        logger.info("📤 下單 Payload: %s", payload)
+        balance       = self.get_account_balance()
+        currency_code = balance.get("currency", "USD") if balance else "USD"
 
-        url = f"{config.IG_API_URL}/positions/otc"
+        logger.info("📤 下單：方向=%s | 手數=%.2f | SL=%.3f | TP=%.3f | 幣別=%s",
+                    direction, deal_size, stop_loss, take_profit, currency_code)
+
+        url     = f"{config.IG_API_URL}/positions/otc"
         headers = {**dict(self.session.headers), "Version": "2"}
+        payload = {
+            "epic":          USDJPY_EPIC,
+            "direction":     direction,
+            "size":          str(deal_size),
+            "orderType":     "MARKET",
+            "timeInForce":   "FILL_OR_KILL",
+            "guaranteedStop": False,
+            "stopLevel":     stop_loss,
+            "profitLevel":   take_profit,
+            "currencyCode":  currency_code,
+            "forceOpen":     True,
+        }
+
         try:
-            resp = self.session.post(url, json=payload, headers=headers, timeout=30)
-            if resp.status_code != 200:
-                logger.error("HTTP %d: %s", resp.status_code, resp.text)
-                return {"executed": False, "reason": f"HTTP_{resp.status_code}", "detail": resp.text}
-            result = resp.json()
-            deal_ref = result.get("dealReference")
-            if not deal_ref:
-                return {"executed": False, "reason": "NO_DEAL_REF", "detail": result}
-            logger.info("✅ 下單請求送出，Deal Reference: %s", deal_ref)
+            response = self.session.post(url, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            result    = response.json()
+            deal_ref  = result.get("dealReference", "N/A")
+            logger.info("✅ 下單請求送出！Deal Reference：%s", deal_ref)
+
             confirm = self._confirm_deal(deal_ref)
-            if not confirm:
-                return {"executed": False, "reason": "CONFIRM_FAILED"}
-            status = confirm.get("dealStatus")
-            reason = confirm.get("reason", "")
-            if status == "ACCEPTED":
-                logger.info("✅ 下單成功！開倉價=%s", confirm.get("level"))
+            if confirm is None:
+                return {"executed": False, "reason": "CONFIRM_FAILED", "detail": None}
+
+            deal_status = confirm.get("dealStatus", "UNKNOWN")
+            reason      = confirm.get("reason", "")
+
+            if deal_status == "ACCEPTED":
+                logger.info("✅ 下單成功！開倉價=%s", confirm.get("level", "N/A"))
                 return {"executed": True, "reason": "ACCEPTED", "detail": confirm}
-            else:
+            elif deal_status == "REJECTED":
                 logger.error("❌ 下單被拒絕：%s", reason)
                 return {"executed": False, "reason": f"REJECTED:{reason}", "detail": confirm}
+            else:
+                logger.warning("⚠️ 下單狀態未知：%s", deal_status)
+                return {"executed": False, "reason": f"UNKNOWN:{deal_status}", "detail": confirm}
+
         except Exception as e:
-            logger.error("下單異常：%s", e)
-            return {"executed": False, "reason": f"ERROR:{e}"}
+    # 加這幾行
+          try:
+            logger.error("❌ IG 回傳內容：%s", response.json())
+          except Exception:
+            logger.error("❌ IG 回傳原始內容：%s", response.text)
+          logger.error("❌ 下單失敗：%s", e, exc_info=True)
+          return {"executed": False, "reason": f"ERROR:{e}", "detail": None}
 
-    def _confirm_deal(self, deal_reference: str, retries=3) -> dict | None:
-        for i in range(retries):
-            try:
-                time.sleep(1)
-                url = f"{config.IG_API_URL}/confirms/{deal_reference}"
-                headers = {**dict(self.session.headers), "Version": "1"}
-                resp = self.session.get(url, headers=headers, timeout=30)
-                resp.raise_for_status()
-                return resp.json()
-            except Exception as e:
-                if i < retries - 1:
-                    logger.warning("確認失敗，重試 %d/3", i+2)
-                else:
-                    logger.error("確認失敗：%s", e)
-        return None
+    # ── 確認下單結果 ──────────────────────────────────────────────
+    def _confirm_deal(self, deal_reference: str) -> dict | None:
+        try:
+            url     = f"{config.IG_API_URL}/confirms/{deal_reference}"
+            headers = {**dict(self.session.headers), "Version": "1"}
+            response = self.session.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            confirm  = response.json()
+            status   = confirm.get("dealStatus", "UNKNOWN")
+            reason   = confirm.get("reason", "")
+            logger.info("📋 下單確認：狀態=%s | 原因=%s", status, reason)
+            return confirm
+        except Exception as e:
+            logger.error("❌ 下單確認失敗：%s", e)
+            return None
 
+    # ── 登出 ─────────────────────────────────────────────────────
     def logout(self) -> None:
         if not self.is_logged_in:
             return
         try:
-            url = f"{config.IG_API_URL}/session"
+            url     = f"{config.IG_API_URL}/session"
             headers = {**dict(self.session.headers), "Version": "1"}
             self.session.delete(url, headers=headers, timeout=10)
             self.is_logged_in = False
-            logger.info("👋 已登出")
+            logger.info("👋 IG 已登出")
         except Exception as e:
-            logger.warning("登出錯誤：%s", e)
+            logger.warning("⚠️ 登出錯誤：%s", e)
 
 
+# ── 測試 ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     config.validate_config()
     trader = IGTrader()
     if trader.login():
         trader.get_account_balance()
         fake_signal = {
-            "direction": "BUY",
-            "confidence": 75,
-            "position_size": 0.4,
-            "risk_level": "MEDIUM",
+            "direction":     "HOLD",
+            "confidence":    75,
+            "stop_loss":     159.0,
+            "take_profit":   161.0,
+            "position_size": 0.5,
+            "risk_level":    "MEDIUM",
         }
+        logger.info("🧪 使用 HOLD 假訊號測試")
         result = trader.place_order(fake_signal)
-        print("下單結果：", result)
+        print(result)
         trader.logout()
-    else:
-        print("登入失敗")

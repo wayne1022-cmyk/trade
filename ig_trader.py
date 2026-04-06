@@ -1,5 +1,5 @@
 """
-ig_trader.py - IG Trading 交易執行模組（淨倉位管理版）
+ig_trader.py - IG Trading 交易執行模組（淨倉位管理版，支援平倉）
 固定維持 0.2 手倉位，方向由 AI 信號決定。
 """
 
@@ -138,29 +138,31 @@ class IGTrader:
             return None
 
     def get_current_position(self):
-        """返回 (方向, 手數)，若無持倉則 (None, 0)"""
+        """返回 (方向, 手數, dealId)，若無持倉則 (None, 0, None)"""
         positions = self.get_open_positions()
         if not positions:
-            return None, 0
+            return None, 0, None
         for pos in positions:
             epic = pos.get("market", {}).get("epic", "")
             if USDJPY_EPIC in epic:
                 direction = pos.get("position", {}).get("direction")  # "BUY" or "SELL"
                 size = float(pos.get("position", {}).get("size", 0))
-                return direction, size
-        return None, 0
+                deal_id = pos.get("position", {}).get("dealId")
+                return direction, size, deal_id
+        return None, 0, None
 
-    def close_position(self, epic: str) -> bool:
-        """平倉指定 EPIC 的所有持倉（假設只有一筆）"""
-        url = f"{config.IG_API_URL}/positions/{epic}"
+    def close_position(self, epic: str, deal_id: str) -> bool:
+        """平倉指定 EPIC 的具體持倉（需要 dealId）"""
+        url = f"{config.IG_API_URL}/positions/{epic}/{deal_id}"
         headers = {**dict(self.session.headers), "Version": "1"}
         try:
             resp = self.session.delete(url, headers=headers, timeout=10)
+            logger.info("平倉響應：%d - %s", resp.status_code, resp.text)
             if resp.status_code == 200:
                 logger.info("✅ 平倉成功：%s", epic)
                 return True
             else:
-                logger.error("❌ 平倉失敗：%s", resp.text)
+                logger.error("❌ 平倉失敗：HTTP %d - %s", resp.status_code, resp.text)
                 return False
         except Exception as e:
             logger.error("平倉異常：%s", e)
@@ -240,8 +242,8 @@ class IGTrader:
             return {"executed": False, "reason": f"DAILY_RISK:{reason}", "detail": None}
 
         # 獲取當前持倉
-        curr_dir, curr_size = self.get_current_position()
-        logger.info("當前持倉：方向=%s, 手數=%.2f", curr_dir if curr_dir else "無", curr_size)
+        curr_dir, curr_size, deal_id = self.get_current_position()
+        logger.info("當前持倉：方向=%s, 手數=%.2f, dealId=%s", curr_dir if curr_dir else "無", curr_size, deal_id)
 
         # 情況1：無持倉 -> 開倉 TARGET_SIZE
         if curr_dir is None:
@@ -253,9 +255,13 @@ class IGTrader:
             logger.info("已有同向持倉 %.2f 手 %s，維持不變", curr_size, curr_dir)
             return {"executed": False, "reason": "ALREADY_ALIGNED", "detail": None}
 
-        # 情況3：有持倉且方向相反 -> 先平倉，再開新倉
+        # 情況3：有持倉且方向相反 -> 先平倉（需要 dealId），再開新倉
+        if not deal_id:
+            logger.error("無法獲取持倉的 dealId，無法平倉")
+            return {"executed": False, "reason": "NO_DEAL_ID", "detail": None}
+
         logger.info("持倉方向相反（現有 %s，AI 建議 %s），先平倉再開新倉", curr_dir, direction)
-        closed = self.close_position(USDJPY_EPIC)
+        closed = self.close_position(USDJPY_EPIC, deal_id)
         if not closed:
             logger.error("平倉失敗，停止開新倉")
             return {"executed": False, "reason": "CLOSE_FAILED", "detail": None}
@@ -297,10 +303,10 @@ if __name__ == "__main__":
     if trader.login():
         trader.get_account_balance()
         fake_signal = {
-            "direction": "BUY",
+            "direction": "SELL",   # 測試反向平倉
             "confidence": 75,
             "stop_loss": 159.00,
-            "take_profit": 159.50,
+            "take_profit": 158.50,
             "risk_level": "MEDIUM",
         }
         result = trader.place_order(fake_signal)

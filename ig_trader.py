@@ -12,14 +12,111 @@ logger = logging.getLogger(__name__)
 USDJPY_EPIC = "CS.D.USDJPY.MINI.IP"   # 迷你合约
 TARGET_SIZE = 0.2                     # 固定仓位大小
 MIN_DEAL_SIZE = 0.2
-MAX_DEAL_SIZE = 0.2                   # 强制最大0.2，不允许更大
+MAX_DEAL_SIZE = 0.2                   # 强制最大0.2
 DEAL_SIZE_STEP = 0.01
 
 
 class IGTrader:
-    # ... （前面的 __init__, login, get_account_balance, get_daily_pnl, check_daily_risk 保持不变，略）
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Content-Type": "application/json; charset=UTF-8",
+            "Accept": "application/json; charset=UTF-8",
+            "X-IG-API-KEY": config.IG_API_KEY,
+        })
+        self.cst = None
+        self.x_security = None
+        self.account_id = None
+        self.is_logged_in = False
 
-    # ==================== 持仓查询与平仓 ====================
+    # ==================== 登入 ====================
+    def login(self, max_retries: int = 3, retry_delay: int = 5) -> bool:
+        url = f"{config.IG_API_URL}/session"
+        headers = {**dict(self.session.headers), "Version": "2"}
+        payload = {
+            "identifier": config.IG_IDENTIFIER,
+            "password": config.IG_PASSWORD,
+            "encryptedPassword": False,
+        }
+
+        for attempt in range(1, max_retries + 1):
+            logger.info("🔐 登入 IG Demo API...（%d/%d）", attempt, max_retries)
+            try:
+                resp = self.session.post(url, json=payload, headers=headers, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+                self.cst = resp.headers.get("CST")
+                self.x_security = resp.headers.get("X-SECURITY-TOKEN")
+                self.account_id = data.get("currentAccountId") or data.get("accountId")
+                if not self.account_id:
+                    accounts = data.get("accounts", [])
+                    if accounts:
+                        self.account_id = accounts[0].get("accountId")
+                if not self.cst or not self.x_security or not self.account_id:
+                    logger.error("登入失敗：缺少必要資訊")
+                    if attempt < max_retries:
+                        time.sleep(retry_delay)
+                    continue
+                self.session.headers.update({
+                    "CST": self.cst,
+                    "X-SECURITY-TOKEN": self.x_security,
+                })
+                self.is_logged_in = True
+                logger.info("✅ 登入成功，帳號 ID：%s", self.account_id)
+                return True
+            except Exception as e:
+                logger.warning("登入失敗（%d/%d）：%s", attempt, max_retries, e)
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+        return False
+
+    # ==================== 查詢餘額 ====================
+    def get_account_balance(self) -> dict | None:
+        if not self.is_logged_in:
+            return None
+        try:
+            url = f"{config.IG_API_URL}/accounts"
+            headers = {**dict(self.session.headers), "Version": "1"}
+            resp = self.session.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            accounts = resp.json().get("accounts", [])
+            if not accounts:
+                return None
+            account = accounts[0]
+            balance = account.get("balance", {})
+            result = {
+                "available": balance.get("available", 0),
+                "equity": balance.get("equity", 0),
+                "profitLoss": balance.get("profitLoss", 0),
+                "currency": account.get("currency", "USD"),
+            }
+            logger.info("💰 餘額 - 可用：%.2f | 淨值：%.2f | 幣別：%s",
+                        result["available"], result["equity"], result["currency"])
+            return result
+        except Exception as e:
+            logger.error("查詢餘額失敗：%s", e)
+            return None
+
+    # ==================== 每日損益 ====================
+    def get_daily_pnl(self) -> dict | None:
+        balance = self.get_account_balance()
+        if not balance:
+            return None
+        equity = balance.get("equity", 0)
+        pnl = balance.get("profitLoss", 0)
+        loss_pct = (-pnl / equity * 100) if equity > 0 and pnl < 0 else 0.0
+        return {"pnl": pnl, "trade_count": 0, "equity": equity, "loss_pct": loss_pct}
+
+    def check_daily_risk(self) -> tuple[bool, str]:
+        daily = self.get_daily_pnl()
+        if not daily:
+            return False, "CANNOT_FETCH_DAILY_PNL"
+        max_loss_pct = config.MAX_DAILY_LOSS_PCT * 100
+        if daily["loss_pct"] >= max_loss_pct:
+            return False, f"DAILY_LOSS_LIMIT:{daily['loss_pct']:.2f}%"
+        return True, ""
+
+    # ==================== 持倉查詢與平倉 ====================
     def get_open_positions(self) -> list | None:
         if not self.is_logged_in:
             return None
@@ -47,7 +144,7 @@ class IGTrader:
         return None, 0
 
     def close_all_positions(self) -> bool:
-        """平仓所有 USDJPY 持仓（使用 DELETE /positions/{epic}）"""
+        """平仓所有 USDJPY 持仓"""
         url = f"{config.IG_API_URL}/positions/{USDJPY_EPIC}"
         headers = {**dict(self.session.headers), "Version": "1"}
         try:
@@ -62,10 +159,9 @@ class IGTrader:
             logger.error("平仓异常：%s", e)
             return False
 
-    # ==================== 开仓（带止损止盈） ====================
+    # ==================== 開倉（帶停損停利） ====================
     def _open_position(self, direction: str, size: float, stop_loss: float = None, take_profit: float = None) -> dict:
-        """开仓，确保 size 固定为 0.2，并添加 stop_loss / take_profit"""
-        size = TARGET_SIZE  # 强制使用固定大小
+        size = TARGET_SIZE  # 强制固定大小
         payload = {
             "epic": USDJPY_EPIC,
             "expiry": "-",
@@ -79,7 +175,6 @@ class IGTrader:
             "currencyCode": "JPY",
             "accountId": self.account_id,
         }
-        # 关键：添加止损止盈
         if stop_loss is not None:
             payload["stopLevel"] = round(stop_loss, 5)
             logger.info("设置止损价：%.5f", stop_loss)
@@ -137,32 +232,26 @@ class IGTrader:
             logger.error("每日风控触发：%s", reason)
             return {"executed": False, "reason": f"DAILY_RISK:{reason}", "detail": None}
 
-        # 获取当前持仓
         curr_dir, curr_size = self.get_current_position()
         logger.info("当前持仓：方向=%s, 手数=%.2f", curr_dir if curr_dir else "无", curr_size)
 
-        # 无持仓：直接开目标仓位
         if curr_dir is None:
             logger.info("无持仓，开仓 %.2f 手 %s", TARGET_SIZE, direction)
             return self._open_position(direction, TARGET_SIZE, stop_loss, take_profit)
 
-        # 有持仓且方向相同：不操作
         if curr_dir == direction:
             logger.info("方向一致，不调整")
             return {"executed": False, "reason": "ALREADY_ALIGNED", "detail": None}
 
-        # 有持仓且方向相反：先平仓，再开仓
         logger.info("方向相反（现有 %s，AI 建议 %s），先平仓再开新仓", curr_dir, direction)
         if not self.close_all_positions():
             logger.error("平仓失败，停止开新仓")
             return {"executed": False, "reason": "CLOSE_FAILED", "detail": None}
 
-        # 平仓成功后，开新仓
         logger.info("平仓成功，开仓 %.2f 手 %s", TARGET_SIZE, direction)
         return self._open_position(direction, TARGET_SIZE, stop_loss, take_profit)
 
     def _confirm_deal(self, deal_reference: str, retries=3) -> dict | None:
-        # ... 保持不变 ...
         for i in range(retries):
             try:
                 time.sleep(1)
@@ -179,7 +268,6 @@ class IGTrader:
         return None
 
     def logout(self) -> None:
-        # ... 保持不变 ...
         if not self.is_logged_in:
             return
         try:

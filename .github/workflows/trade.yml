@@ -1,23 +1,16 @@
-name: USDJPY Trading Bot
+name: Trade Bot Debug
 
 on:
   schedule:
-    # 每10分钟一次 (UTC时间)，周一至周五，对应台湾时间 08:00 到次日 07:50
-    - cron: '*/10 0-23 * * 1-5'
-    # 结算时间：UTC 10:00 (台湾 18:00) 独立触发
-    - cron: '0 10 * * 1-5'
+    # 每10分钟一次，周一至周五 UTC 0-10点（台湾8-18点）
+    - cron: '*/10 0-10 * * 1-5'
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   trade:
     runs-on: ubuntu-latest
-    # 排除结算时间点的触发（避免同时运行两个 job），结算任务单独处理
-    if: github.event.schedule != '0 10 * * 1-5' || github.event_name == 'workflow_dispatch'
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -28,7 +21,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run trading bot (main.py)
+      - name: Debug - Show current time
+        run: |
+          echo "UTC time: $(date -u)"
+          echo "Local time (CST): $(TZ='Asia/Taipei' date)"
+
+      - name: Run trading bot
         run: python main.py
         env:
           TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
@@ -40,7 +38,7 @@ jobs:
           IG_USERNAME: ${{ secrets.IG_USERNAME }}
           IG_EPIC: ${{ secrets.IG_EPIC }}
 
-      - name: Commit and push trade log
+      - name: Commit and push log
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -48,42 +46,4 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           git diff --quiet && git diff --staged --quiet || git commit -m "Update trade log [skip ci]"
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
-
-  settle:
-    runs-on: ubuntu-latest
-    # 仅在结算时间触发
-    if: github.event.schedule == '0 10 * * 1-5'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run settlement (settle.py)
-        run: python settle.py
-        env:
-          TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
-          FINNHUB_KEY: ${{ secrets.FINNHUB_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          IG_API_KEY: ${{ secrets.IG_API_KEY }}
-          IG_IDENTIFIER: ${{ secrets.IG_IDENTIFIER }}
-          IG_PASSWORD: ${{ secrets.IG_PASSWORD }}
-          IG_USERNAME: ${{ secrets.IG_USERNAME }}
-          IG_EPIC: ${{ secrets.IG_EPIC }}
-
-      - name: Commit and push settle log
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git diff --quiet && git diff --staged --quiet || git commit -m "Update settle log [skip ci]"
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:main

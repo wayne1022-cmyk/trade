@@ -2,15 +2,25 @@ name: USDJPY Trading Bot
 
 on:
   schedule:
-    - cron: '0 0-9 * * *'   # UTC 0-9 點 (台灣 8-17 點) 交易
-    - cron: '0 10 * * *'    # UTC 10 點 (台灣 18 點) 結算
+    - cron: '0 0 * * 1-5'
+    - cron: '0 1 * * 1-5'
+    - cron: '0 2 * * 1-5'
+    - cron: '0 3 * * 1-5'
+    - cron: '0 4 * * 1-5'
+    - cron: '0 5 * * 1-5'
+    - cron: '0 6 * * 1-5'
+    - cron: '0 7 * * 1-5'
+    - cron: '0 8 * * 1-5'
+    - cron: '0 9 * * 1-5'
+    - cron: '0 10 * * 1-5'
   workflow_dispatch:
 
 jobs:
-  # 交易任务 (每小时一次)
   trade:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 0-9 * * *' || github.event_name == 'workflow_dispatch'
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule != '0 10 * * 1-5'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -41,14 +51,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add LOG_FILE.txt
+          git add -A
           git diff --quiet && git diff --staged --quiet || git commit -m "Update trade log [skip ci]"
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
 
-  # 结算任务 (每天一次，UTC 10:00)
   settle:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 10 * * *'
+    if: github.event.schedule == '0 10 * * 1-5'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -62,9 +71,13 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run settlement
-        run: python settle.py   # 确保 settle.py 存在
+        run: python settle.py
         env:
+          TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
+          FINNHUB_KEY: ${{ secrets.FINNHUB_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           IG_API_KEY: ${{ secrets.IG_API_KEY }}
           IG_IDENTIFIER: ${{ secrets.IG_IDENTIFIER }}
           IG_PASSWORD: ${{ secrets.IG_PASSWORD }}
+          IG_USERNAME: ${{ secrets.IG_USERNAME }}
           IG_EPIC: ${{ secrets.IG_EPIC }}

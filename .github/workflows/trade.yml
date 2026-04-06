@@ -2,14 +2,18 @@ name: USDJPY Trading Bot
 
 on:
   schedule:
-    # 每小时的 0 分运行（UTC 时间），对应北京时间 8:00, 9:00, ...
-    - cron: '0 * * * *'
-  workflow_dispatch:   # 允许手动触发
+    # 交易时段：UTC 0-9点，对应台湾 8-17点（每小时一次）
+    - cron: '0 0-9 * * *'
+    # 结算时段：UTC 10点，对应台湾 18点（每天一次）
+    - cron: '0 10 * * *'
+  workflow_dispatch:   # 手动触发
 
 jobs:
+  # 交易任务
   run-trade-bot:
     runs-on: ubuntu-latest
-
+    # 仅在交易时段（第一个 cron）执行，避免结算时也跑交易
+    if: github.event.schedule == '0 0-9 * * *' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -22,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirement.txt
+          pip install -r requirements.txt   # 修正文件名
 
       - name: Run trading bot
         run: python main.py
@@ -35,4 +39,27 @@ jobs:
           IG_PASSWORD: ${{ secrets.IG_PASSWORD }}
           IG_USERNAME: ${{ secrets.IG_USERNAME }}
           IG_EPIC: ${{ secrets.IG_EPIC }}
-          
+
+  # 结算任务：平仓所有持仓并记录
+  settle-position:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 10 * * *'   # 仅在UTC 10:00执行
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run settlement
+        run: python settle.py
+        env:
+          IG_API_KEY: ${{ secrets.IG_API_KEY }}
+          IG_IDENTIFIER: ${{ secrets.IG_IDENTIFIER }}
+          IG_PASSWORD: ${{ secrets.IG_PASSWORD }}
+          IG_EPIC: ${{ secrets.IG_EPIC }}

@@ -1,7 +1,7 @@
 name: Cron Test
 on:
   schedule:
-    - cron: '*/1 * * * *'   # 每10分鐘一次，不限制時段
+    - cron: '*/5 * * * *'   # 每5分钟一次
   workflow_dispatch:
 
 jobs:

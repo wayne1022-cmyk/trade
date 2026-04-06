@@ -1,12 +1,9 @@
 name: Cron Test
 on:
   schedule:
-    - cron: '*/5 * * * *'   # 每5分钟一次
-  workflow_dispatch:
-
+  - cron: '*/5 * * * *'
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Show time
-        run: echo "UTC time: $(date -u)"
+    - run: echo "UTC time: $(date -u)"

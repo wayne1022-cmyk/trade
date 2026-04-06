@@ -3,7 +3,7 @@ name: USDJPY Trading Bot
 on:
   schedule:
     # UTC 00:00 到 10:00 (對應台灣時間 08:00 到 18:00)，週一到週五
-    - cron: '0 0-10 * * 1-5'
+    - cron: '0 0-23 * * 1-5'
   workflow_dispatch:
 
 # 確保 GitHub Actions 有權限將 log 檔案 push 回你的 repo

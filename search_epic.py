@@ -8,7 +8,7 @@ def search_usdjpy_epics():
         "X-IG-API-KEY": config.IG_API_KEY,
         "Content-Type": "application/json",
         "Accept": "application/json; charset=UTF-8",
-        "VERSION": "3"
+        "Version": "3"                     # 改为 Version 首字母大写
     }
     payload = {
         "identifier": config.IG_IDENTIFIER,
@@ -30,7 +30,7 @@ def search_usdjpy_epics():
         "CST": cst,
         "X-SECURITY-TOKEN": x_sec,
         "Accept": "application/json; charset=UTF-8",
-        "VERSION": "1"
+        "Version": "1"                     # 统一 Version
     }
     
     search_resp = requests.get(search_url, headers=search_headers)
@@ -38,7 +38,17 @@ def search_usdjpy_epics():
         markets = search_resp.json().get("markets", [])
         print(f"\n✅ 找到 {len(markets)} 個相關市場：")
         for m in markets:
-            print(f"- 名稱: {m.get('instrumentName')} | EPIC: {m.get('epic')} | 狀態: {m.get('marketStatus')}")
+            print(f"- 名稱: {m.get('instrumentName')}")
+            print(f"  EPIC: {m.get('epic')}")
+            print(f"  狀態: {m.get('marketStatus')}")
+            print(f"  類型: {m.get('instrumentType')}")          # CFD / SPREADBET
+            # 打印最小交易量和最小停损距离（如果有）
+            dealing_rules = m.get('dealingRules', {})
+            min_size = dealing_rules.get('minDealSize', {}).get('value', 'N/A')
+            min_step = dealing_rules.get('minStepSize', {}).get('value', 'N/A')
+            min_stop_dist = dealing_rules.get('minStopDistance', {}).get('value', 'N/A')
+            print(f"  最小交易量: {min_size}, 最小步进: {min_step}, 最小停损距离: {min_stop_dist}")
+            print("---")
     else:
         print(f"❌ 搜尋失敗: {search_resp.text}")
 

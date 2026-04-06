@@ -1,12 +1,18 @@
+"""
+ai_analyzer.py - Groq AI 訊號分析模組
+負責：
+  1. 將技術指標資料與新聞整合成結構化 Prompt
+  2. 呼叫 Groq API（LLaMA 3.3 70B）產生交易訊號
+  3. 驗證回傳的 JSON 訊號格式與邏輯正確性
+"""
+
 import json
 import logging
 import time
-import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
+ 
 from groq import Groq
 import pandas as pd
-import requests
-
+ 
 import config
 from data_fetcher import ATR_PERIOD, EMA_LONG, EMA_SHORT, RSI_PERIOD
 
@@ -41,10 +47,10 @@ def _build_prompt(df: pd.DataFrame, news: list) -> str:
     atr = latest["atr"]
 
     # 獲取最新的 KD 值
-    latest_k = df['%K'].iloc[-1] if '%K' in df else None
-    latest_d = df['%D'].iloc[-1] if '%D' in df else None
+    latest_k = df['%K'].iloc[-1] if '%K' in df.columns else None
+    latest_d = df['%D'].iloc[-1] if '%D' in df.columns else None
     kd_signal = ""
-    if latest_k and latest_d:
+    if latest_k is not None and latest_d is not None:
         if latest_k > 80 and latest_d > 80:
             kd_signal = "Overbought zone, possible pullback"
         elif latest_k < 20 and latest_d < 20:
@@ -156,56 +162,89 @@ def _validate_signal(signal: dict, latest_close: float) -> bool:
         logger.error("❌ 無效的交易方向：%s", signal["direction"])
         return False
 
-    if not (0 <= int(signal["confidence"]) <= 100):
-        logger.error("❌ 信心度超出範圍：%s", signal["confidence"])
+   
+    # ✅ 修正2：confidence 加型別保護，LLM 回傳非數字時不會 crash
+    try:
+        confidence = int(signal["confidence"])
+    except (ValueError, TypeError):
+        logger.error("❌ confidence 無法轉為整數：%s", signal["confidence"])
         return False
-
-    if not (0.1 <= float(signal["position_size"]) <= 1.0):
-        logger.error("❌ 部位大小超出範圍：%s", signal["position_size"])
+    if not (0 <= confidence <= 100):
+        logger.error("❌ 信心度超出範圍：%s", confidence)
         return False
-
+ 
+    try:
+        position_size = float(signal["position_size"])
+    except (ValueError, TypeError):
+        logger.error("❌ position_size 無法轉為浮點數：%s", signal["position_size"])
+        return False
+    if not (0.1 <= position_size <= 1.0):
+        logger.error("❌ 部位大小超出範圍：%s", position_size)
+        return False
+ 
+    # ✅ 修正3：HIGH 風險時強制驗證 position_size 上限
+    if signal["risk_level"] == "HIGH" and position_size > 0.3:
+        logger.error("❌ HIGH 風險但 position_size 超過 0.3：%s", position_size)
+        return False
+ 
     direction = signal["direction"]
     sl = float(signal["stop_loss"])
     tp = float(signal["take_profit"])
-
+ 
     if direction == "BUY" and not (sl < latest_close < tp):
         logger.error("❌ BUY 停損停利邏輯錯誤：SL=%s Close=%s TP=%s", sl, latest_close, tp)
         return False
-
+ 
     if direction == "SELL" and not (tp < latest_close < sl):
         logger.error("❌ SELL 停損停利邏輯錯誤：TP=%s Close=%s SL=%s", tp, latest_close, sl)
         return False
-
+ 
+    # ✅ 修正4：補上 HOLD 的 SL/TP 驗證
+    if direction == "HOLD":
+        if sl != latest_close or tp != latest_close:
+            logger.warning(
+                "⚠️ HOLD 時 SL/TP 應等於 latest_close（%.3f），實際 SL=%.3f TP=%.3f，強制修正",
+                latest_close, sl, tp
+            )
+            signal["stop_loss"]  = latest_close
+            signal["take_profit"] = latest_close
+ 
     return True
 
 
 def analyze_and_generate_signal(df, news, max_retries=3):
     prompt = _build_prompt(df, news)
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {config.GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "max_tokens": 4096,
-        "response_format": {"type": "json_object"}
-    }
+    client = Groq(api_key=config.GROQ_API_KEY)
     latest_close = df["close"].iloc[-1]
+ 
     for attempt in range(max_retries):
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=60)
-            resp.raise_for_status()
-            raw = resp.json()["choices"][0]["message"]["content"]
+            chat_completion = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.3-70b-versatile",
+                temperature=0.2,
+                max_tokens=1024,
+                response_format={"type": "json_object"}
+            )
+            raw = chat_completion.choices[0].message.content
             signal = json.loads(raw.strip())
+ 
             if _validate_signal(signal, latest_close):
+                logger.info("✅ Groq 訊號驗證通過（第 %d 次嘗試）", attempt + 1)
                 return signal
+            else:
+                logger.warning("⚠️ 訊號驗證失敗，重試中 (%d/%d)", attempt + 1, max_retries)
+ 
+        except json.JSONDecodeError as e:
+            logger.warning("⚠️ JSON 解析失敗，重試中 (%d/%d)：%s", attempt + 1, max_retries, e)
         except Exception as e:
-            logger.error(f"Groq API 失败 (尝试 {attempt+1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(3)
+            logger.warning("⚠️ Groq API 失敗，重試中 (%d/%d)：%s", attempt + 1, max_retries, e)
+ 
+        # ✅ 修正6：指數退避，避免 rate limit 時固定間隔不夠
+        if attempt < max_retries - 1:
+            time.sleep(3 * (attempt + 1))  # 3s → 6s → 9s
+ 
+    logger.error("❌ Groq API 在 %d 次嘗試後仍失敗，回傳 None", max_retries)
     return None
 
 

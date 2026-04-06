@@ -1,5 +1,6 @@
 """
-ig_trader.py - IG Trading 交易執行模組（最終修正版，使用 JPY 貨幣）
+ig_trader.py - IG Trading 交易執行模組（淨倉位管理版）
+固定維持 0.2 手倉位，方向由 AI 信號決定。
 """
 
 import logging
@@ -9,10 +10,13 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# USDJPY 在 IG 的 Epic 代碼（Demo 環境）
-USDJPY_EPIC = "CS.D.USDJPY.MINI.IP"
+# USDJPY 在 IG 的 Epic 代碼（請確認使用正確的 EPIC）
+USDJPY_EPIC = "CS.D.USDJPY.MINI.IP"   # 迷你合約
 
-# 下單手數範圍與步進
+# 固定目標倉位大小（手數）
+TARGET_SIZE = 0.2
+
+# 下單手數範圍與步進（保留以備用）
 MIN_DEAL_SIZE = 0.2
 MAX_DEAL_SIZE = 1.0
 DEAL_SIZE_STEP = 0.01
@@ -133,79 +137,56 @@ class IGTrader:
             logger.error("查詢持倉失敗：%s", e)
             return None
 
-    def has_open_position(self) -> tuple[bool, str]:
+    def get_current_position(self):
+        """返回 (方向, 手數)，若無持倉則 (None, 0)"""
         positions = self.get_open_positions()
-        if positions is None:
-            return True, "POSITION_CHECK_FAILED"
+        if not positions:
+            return None, 0
         for pos in positions:
-            if USDJPY_EPIC in pos.get("market", {}).get("epic", ""):
-                return True, "ALREADY_IN_POSITION"
-        return False, ""
+            epic = pos.get("market", {}).get("epic", "")
+            if USDJPY_EPIC in epic:
+                direction = pos.get("position", {}).get("direction")  # "BUY" or "SELL"
+                size = float(pos.get("position", {}).get("size", 0))
+                return direction, size
+        return None, 0
 
-    # ==================== 下單 ====================
-    def place_order(self, signal: dict) -> dict | None:
-        if not self.is_logged_in or not self.account_id:
-            return {"executed": False, "reason": "NOT_LOGGED_IN"}
+    def close_position(self, epic: str) -> bool:
+        """平倉指定 EPIC 的所有持倉（假設只有一筆）"""
+        url = f"{config.IG_API_URL}/positions/{epic}"
+        headers = {**dict(self.session.headers), "Version": "1"}
+        try:
+            resp = self.session.delete(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                logger.info("✅ 平倉成功：%s", epic)
+                return True
+            else:
+                logger.error("❌ 平倉失敗：%s", resp.text)
+                return False
+        except Exception as e:
+            logger.error("平倉異常：%s", e)
+            return False
 
-        direction = signal["direction"]
-        position_size = signal["position_size"]
-        confidence = signal["confidence"]
-        risk_level = signal["risk_level"]
-    
-        if direction == "HOLD":
-            return {"executed": False, "reason": "HOLD"}
-        if confidence < 60:
-            return {"executed": False, "reason": "LOW_CONFIDENCE"}
-    
-        can_trade, reason = self.check_daily_risk()
-        if not can_trade:
-            return {"executed": False, "reason": f"DAILY_RISK:{reason}"}
-    
-        has_pos, pos_reason = self.has_open_position()
-        if has_pos:
-            return {"executed": False, "reason": pos_reason}
-    
-        # 计算手数
-        raw = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, position_size))
-        deal_size = round(raw / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
-        deal_size = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, deal_size))
-        logger.info("💡 實際手數：%.2f", deal_size)
-    
-        # 获取当前市价（用于验证停损距离）
-        # 从 snapshot 中获取 bid/offer，这里简单使用 signal 中的 stop_loss/take_profit
-        stop_loss = signal.get("stop_loss")
-        take_profit = signal.get("take_profit")
-        if stop_loss is None or take_profit is None:
-            logger.warning("缺少停損或停利價格，本次不下單")
-            return {"executed": False, "reason": "MISSING_SL_TP"}
-    
-        # 获取最新市场价格（建议通过市场快照获取，这里暂用 signal 中的参考价）
-        # 实际应该调用 /markets/{epic} 获取当前 bid/offer
-        # 简化：假设 signal 中的 stop_loss/take_profit 已符合要求
-        # 验证停损距离（至少 0.002）
-        current_price = None
-        # 为了安全，先不验证距离，直接使用 AI 提供的价格
-    
-        # 使用日圓作為結算貨幣
-        currency_code = "JPY"
-    
+    def _open_position(self, direction: str, size: float, stop_loss: float = None, take_profit: float = None) -> dict:
+        """實際開倉方法（使用市價單）"""
         payload = {
             "epic": USDJPY_EPIC,
             "expiry": "-",
             "direction": direction,
-            "size": f"{deal_size:.2f}",
+            "size": f"{size:.2f}",
             "orderType": "MARKET",
             "timeInForce": "FILL_OR_KILL",
             "guaranteedStop": False,
             "forceOpen": True,
             "marketOrderPreference": "AVAILABLE",
-            "currencyCode": currency_code,
+            "currencyCode": "JPY",
             "accountId": self.account_id,
-            "stopLevel": round(stop_loss, 5),      # 添加停损
-            "profitLevel": round(take_profit, 5),  # 添加停利
         }
-        logger.info("📤 下單 Payload: %s", payload)
-    
+        if stop_loss is not None:
+            payload["stopLevel"] = round(stop_loss, 5)
+        if take_profit is not None:
+            payload["profitLevel"] = round(take_profit, 5)
+
+        logger.info("📤 開倉 Payload: %s", payload)
         url = f"{config.IG_API_URL}/positions/otc"
         headers = {**dict(self.session.headers), "Version": "2"}
         try:
@@ -224,14 +205,62 @@ class IGTrader:
             status = confirm.get("dealStatus")
             reason = confirm.get("reason", "")
             if status == "ACCEPTED":
-                logger.info("✅ 下單成功！開倉價=%s", confirm.get("level"))
+                logger.info("✅ 開倉成功！開倉價=%s", confirm.get("level"))
                 return {"executed": True, "reason": "ACCEPTED", "detail": confirm}
             else:
-                logger.error("❌ 下單被拒絕：%s", reason)
+                logger.error("❌ 開倉被拒絕：%s", reason)
                 return {"executed": False, "reason": f"REJECTED:{reason}", "detail": confirm}
         except Exception as e:
-            logger.error("下單異常：%s", e)
+            logger.error("開倉異常：%s", e)
             return {"executed": False, "reason": f"ERROR:{e}"}
+
+    # ==================== 主要下單入口 ====================
+    def place_order(self, signal: dict) -> dict | None:
+        if not self.is_logged_in or not self.account_id:
+            return {"executed": False, "reason": "NOT_LOGGED_IN"}
+
+        direction = signal["direction"]
+        confidence = signal.get("confidence", 0)
+        risk_level = signal.get("risk_level", "MEDIUM")
+        stop_loss = signal.get("stop_loss")
+        take_profit = signal.get("take_profit")
+
+        # 基本過濾
+        if direction == "HOLD":
+            logger.info("AI 建議 HOLD，不調整倉位")
+            return {"executed": False, "reason": "HOLD", "detail": None}
+        if confidence < 60:
+            logger.warning("信心度過低（%d%%），不操作", confidence)
+            return {"executed": False, "reason": "LOW_CONFIDENCE", "detail": None}
+
+        # 風控檢查
+        can_trade, reason = self.check_daily_risk()
+        if not can_trade:
+            logger.error("每日風控觸發：%s", reason)
+            return {"executed": False, "reason": f"DAILY_RISK:{reason}", "detail": None}
+
+        # 獲取當前持倉
+        curr_dir, curr_size = self.get_current_position()
+        logger.info("當前持倉：方向=%s, 手數=%.2f", curr_dir if curr_dir else "無", curr_size)
+
+        # 情況1：無持倉 -> 開倉 TARGET_SIZE
+        if curr_dir is None:
+            logger.info("無持倉，按 AI 方向開倉 %.2f 手 %s", TARGET_SIZE, direction)
+            return self._open_position(direction, TARGET_SIZE, stop_loss, take_profit)
+
+        # 情況2：有持倉且方向相同 -> 不操作
+        if curr_dir == direction:
+            logger.info("已有同向持倉 %.2f 手 %s，維持不變", curr_size, curr_dir)
+            return {"executed": False, "reason": "ALREADY_ALIGNED", "detail": None}
+
+        # 情況3：有持倉且方向相反 -> 先平倉，再開新倉
+        logger.info("持倉方向相反（現有 %s，AI 建議 %s），先平倉再開新倉", curr_dir, direction)
+        closed = self.close_position(USDJPY_EPIC)
+        if not closed:
+            logger.error("平倉失敗，停止開新倉")
+            return {"executed": False, "reason": "CLOSE_FAILED", "detail": None}
+        # 平倉後開新倉
+        return self._open_position(direction, TARGET_SIZE, stop_loss, take_profit)
 
     def _confirm_deal(self, deal_reference: str, retries=3) -> dict | None:
         for i in range(retries):
@@ -270,7 +299,8 @@ if __name__ == "__main__":
         fake_signal = {
             "direction": "BUY",
             "confidence": 75,
-            "position_size": 0.4,
+            "stop_loss": 159.00,
+            "take_profit": 159.50,
             "risk_level": "MEDIUM",
         }
         result = trader.place_order(fake_signal)

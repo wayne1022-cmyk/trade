@@ -11,11 +11,11 @@ import config
 logger = logging.getLogger(__name__)
 
 # 请根据实际持仓 EPIC 修改（运行诊断代码确认）
-USDJPY_EPIC = "CS.D.USDJPY.CFD.IP"   # 改为你实际使用的 EPIC
+USDJPY_EPIC = "CS.D.USDJPY.MINI.IP"   # 迷你合约（最小 0.2 手）
 TARGET_NET_SIZE = 0.2                # 目标净头寸大小
-MIN_DEAL_SIZE = 0.01
+MIN_DEAL_SIZE = 0.2                  # 最小交易量 0.2
 MAX_DEAL_SIZE = 1.0
-DEAL_SIZE_STEP = 0.01
+DEAL_SIZE_STEP = 0.01                # 步进（虽小，但实际下单需为 0.2 倍数）
 
 
 class IGTrader:
@@ -151,11 +151,11 @@ class IGTrader:
     # ==================== 開倉（單筆） ====================
     def _open_position(self, direction: str, size: float, stop_loss: float = None, take_profit: float = None) -> dict:
         """開一筆訂單（內部使用）"""
-        # 限制大小並按步進取整
-        size = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, size))
-        size = round(size / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
-        size = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, size))
-
+        # 限制大小並確保是 0.2 的倍數（步進 0.2，最小 0.2）
+        size = max(0.2, min(MAX_DEAL_SIZE, size))
+        size = round(size / 0.2) * 0.2
+        if size < 0.2:
+            size = 0.2
         payload = {
             "epic": USDJPY_EPIC,
             "expiry": "-",
@@ -202,7 +202,7 @@ class IGTrader:
             logger.error("開倉異常：%s", e)
             return {"executed": False, "reason": f"ERROR:{e}"}
 
-    # ==================== 主要下單入口（拆分為兩筆） ====================
+    # ==================== 主要下單入口（拆分為合理訂單） ====================
     def place_order(self, signal: dict) -> dict | None:
         if not self.is_logged_in or not self.account_id:
             return {"executed": False, "reason": "NOT_LOGGED_IN"}
@@ -241,42 +241,32 @@ class IGTrader:
             order_direction = "SELL"
             order_size = -delta
 
-        # 將 order_size 拆成兩筆（每筆一半），避免一次開倉過大
-        half_size = order_size / 2.0
-        # 確保每筆不小於最小下單量 0.01
-        if half_size < MIN_DEAL_SIZE:
-            # 如果半倉小於最小量，則只下一筆（但這種情況很少）
-            sizes = [order_size]
-        else:
-            # 按步進取整
-            half_size = round(half_size / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
-            half_size = max(MIN_DEAL_SIZE, half_size)
-            # 調整總量可能因取整略有誤差，第二筆補足
-            first_size = half_size
-            second_size = order_size - first_size
-            if second_size < MIN_DEAL_SIZE:
-                # 如果第二筆太小，合併到第一筆
-                sizes = [order_size]
-            else:
-                second_size = round(second_size / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
-                sizes = [first_size, second_size]
+        # 將 order_size 調整為 0.2 的倍數（因為最小 0.2）
+        step = 0.2
+        order_size = round(order_size / step) * step
+        if order_size < step:
+            order_size = step
 
-        logger.info("目標淨頭寸：%.2f (%s)，當前淨頭寸：%.2f，需調整 %.3f 手 %s，拆為 %d 筆訂單: %s",
-                    target_net, direction, current_net, order_size, order_direction,
-                    len(sizes), sizes)
+        # 決定是否拆分（只有當 order_size >= 0.4 時才拆成兩筆 0.2）
+        if order_size >= 0.4:
+            sizes = [step, order_size - step]
+        else:
+            sizes = [order_size]
+
+        logger.info("目標淨頭寸：%.2f (%s)，當前淨頭寸：%.2f，需調整 %.3f 手 %s，訂單拆分: %s",
+                    target_net, direction, current_net, order_size, order_direction, sizes)
 
         results = []
         all_success = True
         for i, sz in enumerate(sizes, 1):
-            logger.info("發送第 %d 筆訂單：%s %.3f 手", i, order_direction, sz)
+            logger.info("發送第 %d 筆訂單：%s %.2f 手", i, order_direction, sz)
             res = self._open_position(order_direction, sz, stop_loss, take_profit)
             results.append(res)
             if not res.get("executed"):
                 all_success = False
                 logger.error("第 %d 筆訂單失敗，停止後續下單", i)
                 break
-            # 可選：兩筆訂單之間稍微延遲，避免重複提交問題
-            time.sleep(0.5)
+            time.sleep(0.5)  # 避免過於密集
 
         if all_success and len(results) == len(sizes):
             return {"executed": True, "reason": "MULTI_ACCEPTED", "detail": results}
@@ -318,10 +308,10 @@ if __name__ == "__main__":
     if trader.login():
         trader.get_account_balance()
         fake_signal = {
-            "direction": "SELL",   # 測試反向
+            "direction": "BUY",
             "confidence": 75,
             "stop_loss": 159.00,
-            "take_profit": 158.50,
+            "take_profit": 159.50,
             "risk_level": "MEDIUM",
         }
         result = trader.place_order(fake_signal)

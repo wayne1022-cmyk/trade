@@ -1,5 +1,6 @@
 """
-ig_trader.py - IG Trading 交易執行模組（修正版：先平仓再开仓，固定 0.2 手，包含止损止盈）
+ig_trader.py - 净头寸管理版（不平仓，通过两次开仓翻转仓位）
+目标净头寸：±0.2 手，通过调整开仓量实现，避免平仓 API。
 """
 
 import logging
@@ -9,13 +10,12 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# 请根据实际持仓修改 EPIC（通过诊断确定）
+# 请根据实际持仓 EPIC 修改（运行诊断代码确认）
 USDJPY_EPIC = "CS.D.USDJPY.CFD.IP"   # 改为你实际使用的 EPIC
 TARGET_NET_SIZE = 0.2                # 目标净头寸大小
 MIN_DEAL_SIZE = 0.01
 MAX_DEAL_SIZE = 1.0
 DEAL_SIZE_STEP = 0.01
-
 
 
 class IGTrader:
@@ -117,8 +117,8 @@ class IGTrader:
         if daily["loss_pct"] >= max_loss_pct:
             return False, f"DAILY_LOSS_LIMIT:{daily['loss_pct']:.2f}%"
         return True, ""
-    
-    # ==================== 持倉查詢與平倉 ====================
+
+    # ==================== 持倉查詢與淨頭寸計算 ====================
     def get_open_positions(self) -> list | None:
         if not self.is_logged_in:
             return None
@@ -132,57 +132,30 @@ class IGTrader:
             logger.error("查詢持倉失敗：%s", e)
             return None
 
-    def get_current_position(self):
-        """返回 (方向, 手数) 若无持仓则 (None, 0)"""
-        positions = self.get_open_positions()
-        if not positions:
-            return None, 0
-        for pos in positions:
-            epic = pos.get("market", {}).get("epic", "")
-            if USDJPY_EPIC in epic:
-                direction = pos.get("position", {}).get("direction")
-                size = float(pos.get("position", {}).get("size", 0))
-                return direction, size
-        return None, 0
-
-    def close_all_positions(self) -> bool:
-        """平仓所有 USDJPY 持仓"""
-        url = f"{config.IG_API_URL}/positions/{USDJPY_EPIC}"
-        headers = {**dict(self.session.headers), "Version": "1"}
-        try:
-            resp = self.session.delete(url, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                logger.info("✅ 平仓所有 USDJPY 持仓成功")
-                return True
-            else:
-                logger.error("❌ 平仓失败：HTTP %d - %s", resp.status_code, resp.text)
-                return False
-        except Exception as e:
-            logger.error("平仓异常：%s", e)
-            return False
-            
     def get_net_position(self) -> float:
-        """计算当前净头寸（多头手数 - 空头手数）"""
+        """計算當前淨頭寸（多頭手數 - 空頭手數）"""
         positions = self.get_open_positions()
         net = 0.0
         for pos in positions:
             epic = pos.get("market", {}).get("epic", "")
-            if USDJPY_EPIC in epic:   # 模糊匹配，避免后缀差异
+            if USDJPY_EPIC in epic:
                 direction = pos.get("position", {}).get("direction")
                 size = float(pos.get("position", {}).get("size", 0))
                 if direction == "BUY":
                     net += size
                 elif direction == "SELL":
                     net -= size
-        logger.info("当前净头寸：%.3f", net)
+        logger.info("當前淨頭寸：%.3f", net)
         return net
 
-
-    # ==================== 開倉（帶停損停利） ====================
+    # ==================== 開倉（單筆） ====================
     def _open_position(self, direction: str, size: float, stop_loss: float = None, take_profit: float = None) -> dict:
-        # 确保 size 为步进倍数
+        """開一筆訂單（內部使用）"""
+        # 限制大小並按步進取整
         size = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, size))
         size = round(size / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
+        size = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, size))
+
         payload = {
             "epic": USDJPY_EPIC,
             "expiry": "-",
@@ -201,7 +174,7 @@ class IGTrader:
         if take_profit is not None:
             payload["profitLevel"] = round(take_profit, 5)
 
-        logger.info("📤 开仓 Payload: %s", payload)
+        logger.info("📤 開倉 Payload: %s", payload)
         url = f"{config.IG_API_URL}/positions/otc"
         headers = {**dict(self.session.headers), "Version": "2"}
         try:
@@ -213,23 +186,23 @@ class IGTrader:
             deal_ref = result.get("dealReference")
             if not deal_ref:
                 return {"executed": False, "reason": "NO_DEAL_REF", "detail": result}
-            logger.info("✅ 下单请求送出，Deal Reference: %s", deal_ref)
+            logger.info("✅ 下單請求送出，Deal Reference: %s", deal_ref)
             confirm = self._confirm_deal(deal_ref)
             if not confirm:
                 return {"executed": False, "reason": "CONFIRM_FAILED"}
             status = confirm.get("dealStatus")
             reason = confirm.get("reason", "")
             if status == "ACCEPTED":
-                logger.info("✅ 开仓成功！开仓价=%s", confirm.get("level"))
+                logger.info("✅ 開倉成功！開倉價=%s", confirm.get("level"))
                 return {"executed": True, "reason": "ACCEPTED", "detail": confirm}
             else:
-                logger.error("❌ 开仓被拒绝：%s", reason)
+                logger.error("❌ 開倉被拒絕：%s", reason)
                 return {"executed": False, "reason": f"REJECTED:{reason}", "detail": confirm}
         except Exception as e:
-            logger.error("开仓异常：%s", e)
+            logger.error("開倉異常：%s", e)
             return {"executed": False, "reason": f"ERROR:{e}"}
 
-    # ==================== 主要下单入口 ====================
+    # ==================== 主要下單入口（拆分為兩筆） ====================
     def place_order(self, signal: dict) -> dict | None:
         if not self.is_logged_in or not self.account_id:
             return {"executed": False, "reason": "NOT_LOGGED_IN"}
@@ -240,24 +213,27 @@ class IGTrader:
         take_profit = signal.get("take_profit")
 
         if direction == "HOLD":
-            return {"executed": False, "reason": "HOLD"}
+            logger.info("AI 建議 HOLD，不調整倉位")
+            return {"executed": False, "reason": "HOLD", "detail": None}
         if confidence < 60:
-            return {"executed": False, "reason": "LOW_CONFIDENCE"}
+            logger.warning("信心度過低（%d%%），不操作", confidence)
+            return {"executed": False, "reason": "LOW_CONFIDENCE", "detail": None}
 
         can_trade, reason = self.check_daily_risk()
         if not can_trade:
-            return {"executed": False, "reason": f"DAILY_RISK:{reason}"}
+            logger.error("每日風控觸發：%s", reason)
+            return {"executed": False, "reason": f"DAILY_RISK:{reason}", "detail": None}
 
-        # 计算需要调整的净头寸
+        # 計算需要調整的淨頭寸
         current_net = self.get_net_position()
         target_net = TARGET_NET_SIZE if direction == "BUY" else -TARGET_NET_SIZE
-        delta = target_net - current_net   # 需要变化的净头寸
+        delta = target_net - current_net   # 需要變化的淨頭寸
 
         if abs(delta) < 0.001:
-            logger.info("净头寸已达目标 (%.2f)，无需操作", current_net)
-            return {"executed": False, "reason": "ALREADY_ALIGNED"}
+            logger.info("淨頭寸已達目標 (%.2f)，無需操作", current_net)
+            return {"executed": False, "reason": "ALREADY_ALIGNED", "detail": None}
 
-        # 确定开仓方向和大小
+        # 確定開倉方向和大小
         if delta > 0:
             order_direction = "BUY"
             order_size = delta
@@ -265,11 +241,47 @@ class IGTrader:
             order_direction = "SELL"
             order_size = -delta
 
-        # 限制单次开仓大小（避免过大）
-        order_size = max(MIN_DEAL_SIZE, min(MAX_DEAL_SIZE, order_size))
-        logger.info("目标净头寸：%.2f (%s)，当前净头寸：%.2f，需开 %.3f 手 %s",
-                    target_net, direction, current_net, order_size, order_direction)
-        return self._open_position(order_direction, order_size, stop_loss, take_profit)
+        # 將 order_size 拆成兩筆（每筆一半），避免一次開倉過大
+        half_size = order_size / 2.0
+        # 確保每筆不小於最小下單量 0.01
+        if half_size < MIN_DEAL_SIZE:
+            # 如果半倉小於最小量，則只下一筆（但這種情況很少）
+            sizes = [order_size]
+        else:
+            # 按步進取整
+            half_size = round(half_size / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
+            half_size = max(MIN_DEAL_SIZE, half_size)
+            # 調整總量可能因取整略有誤差，第二筆補足
+            first_size = half_size
+            second_size = order_size - first_size
+            if second_size < MIN_DEAL_SIZE:
+                # 如果第二筆太小，合併到第一筆
+                sizes = [order_size]
+            else:
+                second_size = round(second_size / DEAL_SIZE_STEP) * DEAL_SIZE_STEP
+                sizes = [first_size, second_size]
+
+        logger.info("目標淨頭寸：%.2f (%s)，當前淨頭寸：%.2f，需調整 %.3f 手 %s，拆為 %d 筆訂單: %s",
+                    target_net, direction, current_net, order_size, order_direction,
+                    len(sizes), sizes)
+
+        results = []
+        all_success = True
+        for i, sz in enumerate(sizes, 1):
+            logger.info("發送第 %d 筆訂單：%s %.3f 手", i, order_direction, sz)
+            res = self._open_position(order_direction, sz, stop_loss, take_profit)
+            results.append(res)
+            if not res.get("executed"):
+                all_success = False
+                logger.error("第 %d 筆訂單失敗，停止後續下單", i)
+                break
+            # 可選：兩筆訂單之間稍微延遲，避免重複提交問題
+            time.sleep(0.5)
+
+        if all_success and len(results) == len(sizes):
+            return {"executed": True, "reason": "MULTI_ACCEPTED", "detail": results}
+        else:
+            return {"executed": False, "reason": "PARTIAL_FAILED", "detail": results}
 
     def _confirm_deal(self, deal_reference: str, retries=3) -> dict | None:
         for i in range(retries):
@@ -282,9 +294,9 @@ class IGTrader:
                 return resp.json()
             except Exception as e:
                 if i < retries - 1:
-                    logger.warning("确认失败，重试 %d/3", i+2)
+                    logger.warning("確認失敗，重試 %d/3", i+2)
                 else:
-                    logger.error("确认失败：%s", e)
+                    logger.error("確認失敗：%s", e)
         return None
 
     def logout(self) -> None:
@@ -297,7 +309,7 @@ class IGTrader:
             self.is_logged_in = False
             logger.info("👋 已登出")
         except Exception as e:
-            logger.warning("登出错误：%s", e)
+            logger.warning("登出錯誤：%s", e)
 
 
 if __name__ == "__main__":
@@ -306,14 +318,14 @@ if __name__ == "__main__":
     if trader.login():
         trader.get_account_balance()
         fake_signal = {
-            "direction": "BUY",
+            "direction": "SELL",   # 測試反向
             "confidence": 75,
             "stop_loss": 159.00,
-            "take_profit": 159.50,
+            "take_profit": 158.50,
             "risk_level": "MEDIUM",
         }
         result = trader.place_order(fake_signal)
-        print("下单结果：", result)
+        print("下單結果：", result)
         trader.logout()
     else:
-        print("登录失败")
+        print("登入失敗")
